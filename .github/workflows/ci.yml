@@ -21,20 +21,37 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: 'ai-maintainer/package-lock.json'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install AI maintainer dependencies
         working-directory: ai-maintainer
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Lint AI maintainer code
         working-directory: ai-maintainer
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Build AI maintainer
         working-directory: ai-maintainer
-        run: npm run build
+        run: pnpm run build
 
       - name: Validate FiveM resource syntax
         run: |
