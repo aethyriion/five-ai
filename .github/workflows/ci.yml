@@ -1,0 +1,171 @@
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'ai-maintainer/package-lock.json'
+
+      - name: Install AI maintainer dependencies
+        working-directory: ai-maintainer
+        run: npm ci
+
+      - name: Lint AI maintainer code
+        working-directory: ai-maintainer
+        run: npm run lint
+
+      - name: Build AI maintainer
+        working-directory: ai-maintainer
+        run: npm run build
+
+      - name: Validate FiveM resource syntax
+        run: |
+          echo "Checking Lua syntax for ai_health resource"
+          find resources/ai_health -name "*.lua" -exec lua -c {} \;
+
+      - name: Validate Docker configuration
+        run: |
+          docker-compose config
+
+  test-ephemeral-server:
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up test environment variables
+        run: |
+          cat > .env << EOF
+          FIVEM_LICENSE_KEY=${{ secrets.FIVEM_LICENSE_KEY }}
+          FIVEM_SERVER_NAME=CI Test Server
+          FIVEM_MAX_CLIENTS=8
+          FIVEM_RCON_PASSWORD=test_rcon
+          POSTGRES_DB=test_db
+          POSTGRES_USER=test_user
+          POSTGRES_PASSWORD=test_password
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+          HEALTH_CHECK_TOKEN=test_token
+          GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          REPOSITORY_OWNER=${{ github.repository_owner }}
+          REPOSITORY_NAME=${{ github.event.repository.name }}
+          EOF
+
+      - name: Build Docker images
+        run: |
+          docker-compose build
+
+      - name: Start FiveM server
+        run: |
+          docker-compose up -d fivem postgres
+
+      - name: Wait for server startup
+        run: |
+          timeout 120 bash -c 'until curl -f http://localhost:30120/health; do sleep 5; done'
+
+      - name: Run health checks
+        run: |
+          echo "Testing health endpoint"
+          curl -f http://localhost:30120/health | jq .
+
+          echo "Testing RPC endpoint with heartbeat"
+          curl -X POST http://localhost:30120/rpc \
+            -H "Content-Type: application/json" \
+            -d '{"command": "heartbeat"}' | jq .
+
+          echo "Testing RPC endpoint with status"
+          curl -X POST http://localhost:30120/rpc \
+            -H "Content-Type: application/json" \
+            -d '{"command": "status"}' | jq .
+
+      - name: Test invalid RPC command (should fail)
+        run: |
+          echo "Testing invalid command (should return 403)"
+          curl -X POST http://localhost:30120/rpc \
+            -H "Content-Type: application/json" \
+            -d '{"command": "invalid_command"}' \
+            -w "%{http_code}" | grep -q "403"
+
+      - name: Show server logs on failure
+        if: failure()
+        run: |
+          docker-compose logs fivem
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker-compose down -v
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: test-ephemeral-server
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker images
+        run: |
+          # Build and tag images
+          docker-compose build
+
+          # Tag for registry
+          docker tag five-ai-fivem ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-fivem:latest
+          docker tag five-ai-ai-maintainer ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ai-maintainer:latest
+
+          # Push to registry
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-fivem:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ai-maintainer:latest
