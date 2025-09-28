@@ -60,7 +60,7 @@ jobs:
 
       - name: Validate Docker configuration
         run: |
-          docker-compose config
+          docker compose config
 
   test-ephemeral-server:
     runs-on: ubuntu-latest
@@ -103,11 +103,11 @@ jobs:
 
       - name: Build Docker images
         run: |
-          docker-compose build
+          docker compose build
 
       - name: Start FiveM server
         run: |
-          docker-compose up -d fivem postgres
+          docker compose up -d fivem postgres
 
       - name: Wait for server startup
         run: |
@@ -139,12 +139,12 @@ jobs:
       - name: Show server logs on failure
         if: failure()
         run: |
-          docker-compose logs fivem
+          docker compose logs fivem
 
       - name: Cleanup
         if: always()
         run: |
-          docker-compose down -v
+          docker compose down -v
 
   build-and-push:
     runs-on: ubuntu-latest
@@ -177,7 +177,7 @@ jobs:
       - name: Build and push Docker images
         run: |
           # Build and tag images
-          docker-compose build
+          docker compose build
 
           # Tag for registry
           docker tag five-ai-fivem ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-fivem:latest
